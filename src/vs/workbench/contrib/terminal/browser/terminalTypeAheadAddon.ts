@@ -9,6 +9,7 @@ import { debounce } from 'vs/base/common/decorators';
 import { Emitter } from 'vs/base/common/event';
 import { Disposable } from 'vs/base/common/lifecycle';
 import { ITelemetryService } from 'vs/platform/telemetry/common/telemetry';
+import { DEFAULT_ATTR_DATA, updateCharAttributes } from 'vs/workbench/contrib/terminal/browser/terminalCharAttributes';
 import { TerminalConfigHelper } from 'vs/workbench/contrib/terminal/browser/terminalConfigHelper';
 import { XTermAttributes, XTermCore } from 'vs/workbench/contrib/terminal/browser/xterm-private';
 import { IBeforeProcessDataEvent, ITerminalConfiguration, ITerminalProcessManager } from 'vs/workbench/contrib/terminal/common/terminal';
@@ -187,7 +188,7 @@ export interface IPrediction {
 	/**
 	 * If available, this will be called when the prediction is correct.
 	 */
-	rollForwards(cursor: Cursor, withInput: string, cursorAttributes: string): string;
+	rollForwards(cursor: Cursor, withInput: string, cursorAttributes: XTermAttributes): string;
 
 	/**
 	 * Returns whether the given input is one expected by this prediction.
@@ -354,7 +355,7 @@ class CharacterPrediction implements IPrediction {
 	public apply(_: IBuffer, cursor: Cursor) {
 		const cell = cursor.getCell();
 		this.appliedAt = cell
-			? { pos: cursor.coordinate, oldAttributes: getBufferCellAttributes(cell), oldChar: cell.getChars() }
+			? { pos: cursor.coordinate, oldAttributes: attributesToSeq(cell), oldChar: cell.getChars() }
 			: { pos: cursor.coordinate, oldAttributes: '', oldChar: '' };
 
 		cursor.shift(1);
@@ -375,12 +376,12 @@ class CharacterPrediction implements IPrediction {
 		return r;
 	}
 
-	public rollForwards(cursor: Cursor, input: string, cursorAttributes: string) {
+	public rollForwards(cursor: Cursor, input: string, cursorAttributes: XTermAttributes) {
 		if (!this.appliedAt) {
 			return ''; // not applied
 		}
 
-		return cursor.clone().moveTo(this.appliedAt.pos) + cursorAttributes + input;
+		return cursor.clone().moveTo(this.appliedAt.pos) + attributesToSeq(cursorAttributes) + input;
 	}
 
 	public matches(input: StringReader) {
@@ -410,7 +411,7 @@ class BackspacePrediction extends CharacterPrediction {
 	public apply(_: IBuffer, cursor: Cursor) {
 		const cell = cursor.getCell();
 		this.appliedAt = cell
-			? { pos: cursor.coordinate, oldAttributes: getBufferCellAttributes(cell), oldChar: cell.getChars() }
+			? { pos: cursor.coordinate, oldAttributes: attributesToSeq(cell), oldChar: cell.getChars() }
 			: { pos: cursor.coordinate, oldAttributes: '', oldChar: '' };
 
 		return cursor.shift(-1) + DELETE_CHAR;
@@ -501,7 +502,7 @@ class CursorMovePrediction implements IPrediction {
 	public apply(buffer: IBuffer, cursor: Cursor) {
 		const prevPosition = cursor.x;
 		const currentCell = cursor.getCell();
-		const prevAttrs = currentCell ? getBufferCellAttributes(currentCell) : '';
+		const prevAttrs = currentCell ? attributesToSeq(currentCell) : '';
 
 		const { amount, direction, moveByWords } = this;
 		const delta = direction === CursorMoveDirection.Back ? -1 : 1;
@@ -640,7 +641,7 @@ export class PredictionTimeline {
 	/**
 	 * Cursor graphics attributes prior to applying the predictions.
 	 */
-	private cursorAttrs = `${CSI}0m`;
+	private cursorAttrs = DEFAULT_ATTR_DATA.clone();
 
 	/**
 	 * Current prediction generation.
@@ -766,7 +767,7 @@ export class PredictionTimeline {
 					const rollback = this.expected.filter(p => p.gen === startingGen).reverse();
 					output += rollback.map(({ p }) => p.rollback(this.getCursor(buffer))).join('');
 					if (rollback.some(r => r.p.affectsStyle)) {
-						output += this.cursorAttrs;
+						output += attributesToSeq(this.cursorAttrs);
 					}
 					this.expected = [];
 					this.cursor = undefined;
@@ -865,14 +866,13 @@ export class PredictionTimeline {
 	 * Should be called when graphics attributes are written to the terminal
 	 * in order to track the intended cursor style.
 	 */
-	public updateCursorSyle(args: number[], typeaheadArgs: number[]) {
+	public updateCursorSyle(args: (number | number[])[], typeaheadArgs: number[]) {
 		if (this.expectedIncomingStyles && arrayEqual(args, typeaheadArgs)) {
 			this.expectedIncomingStyles--;
 			return;
 		}
 
-		// todo: apply to attribute smartly once xterm api is available...
-		this.cursorAttrs = `${CSI}${args.join(';')}m`;
+		updateCharAttributes(this.cursorAttrs, args);
 	}
 
 	public getCursor(buffer: IBuffer) {
@@ -898,7 +898,7 @@ export class PredictionTimeline {
 /**
  * Gets the escape sequence to restore state/appearence in the cell.
  */
-const getBufferCellAttributes = (cell: XTermAttributes) => cell.isAttributeDefault()
+const attributesToSeq = (cell: XTermAttributes) => cell.isAttributeDefault()
 	? `${CSI}0m`
 	: [
 		cell.isBold() && `${CSI}1m`,
@@ -958,7 +958,7 @@ export class TypeAheadAddon extends Disposable implements ITerminalAddon {
 
 		timeline.setShowPredictions(this.typeaheadThreshold === 0);
 		this._register(terminal.parser.registerCsiHandler({ final: 'm' }, args => {
-			timeline.updateCursorSyle(args as number[], this.typeaheadArgs);
+			timeline.updateCursorSyle(args, this.typeaheadArgs);
 			return false;
 		}));
 		this._register(terminal.onData(e => this.onUserData(e)));
